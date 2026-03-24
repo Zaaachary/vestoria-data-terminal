@@ -6,6 +6,7 @@ Usage:
     python -m app.cli fill-history [--start DATE] [--end DATE] [--assets ID,ID,...]
     python -m app.cli update-prices [--assets ID,ID,...] [--lookback DAYS]
     python -m app.cli recalc [--indicator ID] [--start DATE] [--end DATE]
+    python -m app.cli fetch-indicator --type TYPE [--indicator ID] [--start DATE] [--end DATE]
     python -m app.cli status
 """
 import sys
@@ -21,7 +22,7 @@ from app.models.indicator import Indicator
 from app.models.price_data import PriceData
 from app.services.backfill import backfill_all_assets, incremental_update
 from app.services.price_scheduler import run_price_update
-from app.services.indicator_scheduler import calculate_all_indicators, calculate_indicator_latest
+from app.services.indicator_scheduler import calculate_all_indicators, calculate_indicator_latest, fetch_external_indicator, fetch_latest_external_indicator
 
 
 def cmd_fill_history(args):
@@ -101,6 +102,66 @@ def cmd_recalc(args):
             print(f"  {status} {name}: {r.get('count', 0)} values")
 
 
+def cmd_fetch_indicator(args):
+    """Fetch external indicator data from APIs."""
+    indicator_type = args.type
+    indicator_id = args.indicator
+    start = args.start
+    end = args.end
+    
+    # Supported external indicator types
+    external_types = {
+        "fear_greed": "BTC Fear & Greed",
+        "vix": "VIX Index"
+    }
+    
+    if indicator_type not in external_types:
+        print(f"❌ Unsupported indicator type: {indicator_type}")
+        print(f"Supported types: {', '.join(external_types.keys())}")
+        return
+    
+    print(f"Fetching {external_types[indicator_type]} ({indicator_type})...")
+    
+    if indicator_id:
+        # Fetch specific indicator
+        print(f"Indicator ID: {indicator_id}")
+        result = fetch_external_indicator(indicator_type, indicator_id, start, end)
+    else:
+        # Auto-detect indicator by template
+        db = SessionLocal()
+        try:
+            # Map type to template_id
+            template_map = {
+                "fear_greed": "BTC_FEAR_GREED",
+                "vix": "VIX"
+            }
+            template_id = template_map.get(indicator_type)
+            
+            indicator = db.query(Indicator).filter(
+                Indicator.template_id == template_id
+            ).first()
+            
+            if not indicator:
+                print(f"❌ No indicator found for type: {indicator_type}")
+                return
+            
+            print(f"Found indicator: {indicator.name} (ID: {indicator.id})")
+            result = fetch_external_indicator(indicator_type, indicator.id, start, end)
+        finally:
+            db.close()
+    
+    # Display result
+    if result["status"] == "success":
+        print(f"\n✅ Fetch completed:")
+        print(f"   Records: {result.get('count', 0)}")
+        print(f"   Inserted: {result.get('inserted', 0)}")
+        print(f"   Updated: {result.get('updated', 0)}")
+        if result.get('start_date'):
+            print(f"   Date range: {result['start_date']} to {result['end_date']}")
+    else:
+        print(f"\n❌ Fetch failed: {result.get('message')}")
+
+
 def cmd_status(args):
     """Show system status."""
     db = SessionLocal()
@@ -166,6 +227,21 @@ def main():
     recalc_parser.add_argument("--start", type=date.fromisoformat, help="Start date")
     recalc_parser.add_argument("--end", type=date.fromisoformat, help="End date")
     
+    # fetch-indicator command
+    fetch_parser = subparsers.add_parser(
+        "fetch-indicator",
+        help="Fetch external indicator data from APIs"
+    )
+    fetch_parser.add_argument(
+        "--type", 
+        required=True,
+        choices=["fear_greed", "vix"],
+        help="Indicator type"
+    )
+    fetch_parser.add_argument("--indicator", type=int, help="Specific indicator ID")
+    fetch_parser.add_argument("--start", type=date.fromisoformat, help="Start date (YYYY-MM-DD)")
+    fetch_parser.add_argument("--end", type=date.fromisoformat, help="End date (YYYY-MM-DD)")
+    
     # status command
     subparsers.add_parser("status", help="Show system status")
     
@@ -177,6 +253,8 @@ def main():
         cmd_update_prices(args)
     elif args.command == "recalc":
         cmd_recalc(args)
+    elif args.command == "fetch-indicator":
+        cmd_fetch_indicator(args)
     elif args.command == "status":
         cmd_status(args)
     else:

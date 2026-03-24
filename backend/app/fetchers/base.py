@@ -1,7 +1,7 @@
 """Fetcher base class."""
 from abc import ABC, abstractmethod
-from datetime import date
-from typing import List, Optional
+from datetime import date, datetime
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 
@@ -16,8 +16,20 @@ class AssetSearchResult:
     extra: Optional[dict] = None
 
 
+@dataclass
+class IndicatorDataPoint:
+    """Indicator data point for external fetchers."""
+    date: date
+    timestamp: datetime
+    value: float
+    value_text: Optional[str] = None
+    grade: Optional[int] = None
+    grade_label: Optional[str] = None
+    extra_data: Optional[Dict[str, Any]] = None
+
+
 class BaseFetcher(ABC):
-    """Base class for data fetchers."""
+    """Base class for price data fetchers."""
     
     name: str = ""  # Fetcher identifier
     display_name: str = ""  # Human readable name
@@ -57,3 +69,30 @@ class BaseFetcher(ABC):
         start = end - timedelta(days=5)
         prices = await self.fetch_prices(source_symbol, start, end)
         return prices[-1] if prices else None
+
+
+class BaseIndicatorFetcher(ABC):
+    """Base class for external indicator data fetchers."""
+    
+    name: str = ""  # Fetcher identifier
+    display_name: str = ""  # Human readable name
+    indicator_type: str = ""  # e.g., "fear_greed", "vix"
+    
+    @abstractmethod
+    async def fetch_history(
+        self, 
+        start: date, 
+        end: date,
+        limit: int = 1000
+    ) -> List[IndicatorDataPoint]:
+        """
+        Fetch historical indicator data.
+        
+        Returns list of IndicatorDataPoint.
+        """
+        pass
+    
+    @abstractmethod
+    async def fetch_latest(self) -> Optional[IndicatorDataPoint]:
+        """Fetch latest indicator value."""
+        pass

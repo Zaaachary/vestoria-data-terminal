@@ -365,3 +365,269 @@ def calculate_indicator_latest(indicator_id: int) -> Dict:
     """
     scheduler = get_indicator_scheduler()
     return scheduler.calculate_latest(indicator_id)
+
+
+# ============== External Indicator Fetching ==============
+
+from app.fetchers.fear_greed_fetcher import FearGreedFetcher
+from app.fetchers.base import BaseIndicatorFetcher
+
+
+class ExternalIndicatorService:
+    """
+    Service for fetching external indicator data from APIs.
+    
+    This handles indicators that are fetched from external sources
+    (like alternative.me, Yahoo Finance) rather than calculated locally.
+    """
+    
+    def __init__(self):
+        self._fetchers: Dict[str, BaseIndicatorFetcher] = {}
+        self._register_builtin_fetchers()
+    
+    def _register_builtin_fetchers(self):
+        """Register built-in external indicator fetchers."""
+        self._fetchers["fear_greed"] = FearGreedFetcher()
+    
+    def get_fetcher(self, indicator_type: str) -> Optional[BaseIndicatorFetcher]:
+        """Get fetcher by indicator type."""
+        return self._fetchers.get(indicator_type)
+    
+    def fetch_and_save_indicator(
+        self,
+        indicator_type: str,
+        indicator_id: int,
+        start: date = None,
+        end: date = None
+    ) -> Dict:
+        """
+        Fetch external indicator data and save to database.
+        
+        Args:
+            indicator_type: Type of indicator (e.g., "fear_greed")
+            indicator_id: Database indicator ID
+            start: Start date
+            end: End date
+        
+        Returns:
+            Result dict with counts
+        """
+        fetcher = self.get_fetcher(indicator_type)
+        if not fetcher:
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": f"No fetcher registered for type: {indicator_type}"
+            }
+        
+        if end is None:
+            end = date.today()
+        if start is None:
+            start = end - timedelta(days=365)
+        
+        print(f"Fetching {indicator_type} from {start} to {end}...")
+        
+        # Fetch data
+        try:
+            data_points = asyncio.run(fetcher.fetch_history(start, end))
+        except Exception as e:
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": f"Fetch failed: {e}"
+            }
+        
+        if not data_points:
+            return {
+                "indicator_type": indicator_type,
+                "status": "success",
+                "message": "No data returned",
+                "count": 0
+            }
+        
+        # Save to database
+        db = SessionLocal()
+        try:
+            inserted = 0
+            updated = 0
+            
+            for point in data_points:
+                existing = db.query(IndicatorValue).filter(
+                    IndicatorValue.indicator_id == indicator_id,
+                    IndicatorValue.date == point.date
+                ).first()
+                
+                if existing:
+                    existing.value = point.value
+                    existing.value_text = point.value_text
+                    existing.grade = point.grade
+                    existing.grade_label = point.grade_label
+                    existing.extra_data = point.extra_data or {}
+                    existing.timestamp = point.timestamp
+                    existing.source = "external_api"
+                    updated += 1
+                else:
+                    db_value = IndicatorValue(
+                        indicator_id=indicator_id,
+                        date=point.date,
+                        timestamp=point.timestamp,
+                        value=point.value,
+                        value_text=point.value_text,
+                        grade=point.grade,
+                        grade_label=point.grade_label,
+                        extra_data=point.extra_data or {},
+                        source="external_api"
+                    )
+                    db.add(db_value)
+                    inserted += 1
+            
+            # Update indicator last_calculated_at
+            indicator = db.query(Indicator).filter(Indicator.id == indicator_id).first()
+            if indicator:
+                indicator.last_calculated_at = datetime.utcnow()
+            
+            db.commit()
+            
+            return {
+                "indicator_type": indicator_type,
+                "indicator_id": indicator_id,
+                "status": "success",
+                "count": len(data_points),
+                "inserted": inserted,
+                "updated": updated,
+                "start_date": data_points[0].date,
+                "end_date": data_points[-1].date
+            }
+            
+        except Exception as e:
+            db.rollback()
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": str(e)
+            }
+        finally:
+            db.close()
+    
+    def fetch_latest_external(self, indicator_type: str, indicator_id: int) -> Dict:
+        """Fetch and save latest external indicator value."""
+        fetcher = self.get_fetcher(indicator_type)
+        if not fetcher:
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": f"No fetcher registered for type: {indicator_type}"
+            }
+        
+        try:
+            point = asyncio.run(fetcher.fetch_latest())
+        except Exception as e:
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": f"Fetch failed: {e}"
+            }
+        
+        if not point:
+            return {
+                "indicator_type": indicator_type,
+                "status": "success",
+                "message": "No data returned"
+            }
+        
+        # Save to database
+        db = SessionLocal()
+        try:
+            existing = db.query(IndicatorValue).filter(
+                IndicatorValue.indicator_id == indicator_id,
+                IndicatorValue.date == point.date
+            ).first()
+            
+            if existing:
+                existing.value = point.value
+                existing.value_text = point.value_text
+                existing.grade = point.grade
+                existing.grade_label = point.grade_label
+                existing.extra_data = point.extra_data or {}
+                existing.timestamp = point.timestamp
+                existing.source = "external_api"
+            else:
+                db_value = IndicatorValue(
+                    indicator_id=indicator_id,
+                    date=point.date,
+                    timestamp=point.timestamp,
+                    value=point.value,
+                    value_text=point.value_text,
+                    grade=point.grade,
+                    grade_label=point.grade_label,
+                    extra_data=point.extra_data or {},
+                    source="external_api"
+                )
+                db.add(db_value)
+            
+            # Update indicator
+            indicator = db.query(Indicator).filter(Indicator.id == indicator_id).first()
+            if indicator:
+                indicator.last_calculated_at = datetime.utcnow()
+            
+            db.commit()
+            
+            return {
+                "indicator_type": indicator_type,
+                "indicator_id": indicator_id,
+                "status": "success",
+                "date": point.date.isoformat(),
+                "value": point.value,
+                "value_text": point.value_text,
+                "grade": point.grade,
+                "grade_label": point.grade_label
+            }
+            
+        except Exception as e:
+            db.rollback()
+            return {
+                "indicator_type": indicator_type,
+                "status": "error",
+                "message": str(e)
+            }
+        finally:
+            db.close()
+
+
+# Global service instance
+_external_service: Optional[ExternalIndicatorService] = None
+
+
+def get_external_indicator_service() -> ExternalIndicatorService:
+    """Get or create external indicator service."""
+    global _external_service
+    if _external_service is None:
+        _external_service = ExternalIndicatorService()
+    return _external_service
+
+
+def fetch_external_indicator(
+    indicator_type: str,
+    indicator_id: int,
+    start: date = None,
+    end: date = None
+) -> Dict:
+    """
+    Convenience function to fetch external indicator history.
+    
+    Usage:
+        result = fetch_external_indicator("fear_greed", 1)
+    """
+    service = get_external_indicator_service()
+    return service.fetch_and_save_indicator(indicator_type, indicator_id, start, end)
+
+
+def fetch_latest_external_indicator(indicator_type: str, indicator_id: int) -> Dict:
+    """
+    Convenience function to fetch latest external indicator.
+    
+    Usage:
+        result = fetch_latest_external_indicator("fear_greed", 1)
+    """
+    service = get_external_indicator_service()
+    return service.fetch_latest_external(indicator_type, indicator_id)
