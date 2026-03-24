@@ -1,0 +1,25 @@
+"""Indicators package."""
+from app.indicators.base import BaseIndicatorProcessor, IndicatorResult
+from app.indicators.registry import (
+    register_processor,
+    get_processor,
+    list_processors,
+    create_processor,
+)
+
+# Import all indicator implementations to register them
+from app.indicators.ma200 import MA200Indicator
+from app.indicators.btc_fear_greed import BTCFearGreedIndicator
+from app.indicators.vix import VIXIndicator
+
+__all__ = [
+    "BaseIndicatorProcessor",
+    "IndicatorResult",
+    "register_processor",
+    "get_processor",
+    "list_processors",
+    "create_processor",
+    "MA200Indicator",
+    "BTCFearGreedIndicator",
+    "VIXIndicator",
+]
