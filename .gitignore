@@ -35,3 +35,8 @@ data/*.db.*
 # Test coverage
 htmlcov/
 .coverage
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

@@ -10,8 +10,8 @@ def init_indicator_templates(db: Session):
     templates = [
         {
             "id": "MA200",
-            "name": "200周均线偏离度",
-            "description": "计算价格相对于200周均线的偏离百分比，用于判断长期趋势和估值水平",
+            "name": "200日均线偏离度",
+            "description": "计算价格相对于200日均线的偏离百分比，用于判断中长期趋势和估值水平",
             "indicator_type": "metric",
             "category": "trend",
             "processor_class": "MA200",
@@ -24,7 +24,7 @@ def init_indicator_templates(db: Session):
                 {"name": "value_text", "type": "string", "description": "文本描述", "optional": True},
                 {"name": "grade", "type": "string", "description": "档位", "optional": True},
                 {"name": "grade_label", "type": "string", "description": "档位标签", "optional": True},
-                {"name": "ma_value", "type": "float", "description": "200周均线值", "optional": True},
+                {"name": "ma_value", "type": "float", "description": "200日均线值", "optional": True},
                 {"name": "current_price", "type": "float", "description": "当前价格", "optional": True},
             ],
             "grading_config": {
