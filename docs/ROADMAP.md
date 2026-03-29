@@ -1,6 +1,6 @@
 # Data Terminal - 开发路线图
 
-> 最后更新: 2026-03-24
+> 最后更新: 2026-03-28
 
 ---
 
@@ -31,15 +31,18 @@
 
 ---
 
-## 进行中/待开发 🚧
+### Phase 4：每日自动化调度 ✅ (2026-03-27, PR #1)
+- [x] APScheduler BackgroundScheduler 集成到 FastAPI lifespan
+- [x] 定时任务:
+  - [x] `update_crypto`: 每天 09:00 CST → BTC-USD 价格 + Fear & Greed
+  - [x] `update_us_market`: 每天 06:00 CST → SPY 价格 + VIX
+- [x] 调度管理 API: `/api/v1/scheduler/` (status/history/run/pause/resume)
+- [x] 执行日志持久化: `scheduler_run_logs` 表
+- [x] 配置开关: `SCHEDULER_ENABLED` 环境变量
 
-### Phase 4：Watch List & 每日自动化
-- [ ] Watchlist 关注列表模型
-- [ ] 添加/移除标的到关注列表
-- [ ] 关注列表价格聚合查询
-- [ ] APScheduler 定时任务集成
-- [ ] 每日自动更新价格
-- [ ] 更新日志与监控
+---
+
+## 进行中/待开发 🚧
 
 ### Phase 5：多数据源与搜索
 - [ ] Fetcher 搜索接口 (search, list_assets)
@@ -49,15 +52,13 @@
 - [ ] 数据源浏览接口
 
 ### Phase 6：前端与可视化
-- [ ] TradingView 轻量图表集成
-  - [ ] /tv/config
-  - [ ] /tv/symbols
-  - [ ] /tv/history
-- [ ] Dashboard 数据面板
-- [ ] 标的搜索页
-- [ ] 价格图表页
-- [ ] 关注列表页
-- [ ] 指标展示页
+- **分支**: `feature/frontend-ui` 已创建
+- **技术栈**: React + TS + Vite + Zustand + Lucide React（沿用 fund-manager 风格）
+- **4 页 MVP 设计** (待确认):
+  1. **Dashboard** — 市场概览（价格卡片 + 指标仪表盘 + 迷你趋势图 + 调度状态）
+  2. **Market** — 资产列表 + 详情（价格图表 + 关联指标）
+  3. **Indicators** — 指标卡片 + 详情（历史图表 + 分档说明）
+  4. **Scheduler** — 任务列表 + 执行历史 + 操作按钮
 
 ### Phase 7：监控与告警
 - [ ] 指标档位变化通知
@@ -66,19 +67,30 @@
 
 ---
 
+## 代码审查发现的问题 📝
+
+### 技术债务
+- [ ] `backfill.py` 直接调 yfinance 没走 fetcher 抽象层（重复逻辑）
+- [ ] `indicator_scheduler` 和 `fear_greed_fetcher` 有重复的 upsert 逻辑
+- [ ] Fetcher 定义为 async 但实际用 requests (同步)
+- [ ] `cli.py` 硬编码了绝对路径
+- [ ] 未使用 Alembic 做数据库迁移
+
+---
+
 ## 系统当前状态
 
-### 数据状态 (2026-03-24)
+### 数据状态 (2026-03-27)
 | 资产 | 数据量 | 最新日期 | 最新价格 |
 |------|--------|---------|---------|
-| BTC-USD | 366条 | 2026-03-24 | 70828.74 |
-| SPY | 251条 | 2026-03-24 | 655.38 |
+| BTC-USD | 369条 | 2026-03-27 | $66,786 |
+| SPY | 254条 | 2026-03-26 | $645.09 |
 
 ### 指标状态
 | 指标 | 当前值 | 档位 | 数据来源 |
 |------|--------|------|---------|
-| BTC 恐慌贪婪 | 11 | 极度恐惧 | alternative.me |
-| VIX | 26.11 | 波动加剧 | Yahoo Finance |
+| BTC 恐慌贪婪 | 13 | 极度恐惧 | alternative.me |
+| VIX | 29.08 | 波动加剧 | Yahoo Finance |
 
 ---
 
@@ -115,7 +127,7 @@ open http://localhost:8000/docs
 
 ## 下一步优先级
 
-1. **Phase 4**: 实现 Watchlist 和每日自动更新 (高优先级)
+1. **Phase 6**: 前端可视化 4 页 MVP (高优先级，待确认方案)
 2. **Phase 5**: 添加更多数据源 (中优先级)
-3. **Phase 6**: 前端可视化 (中优先级)
+3. **技术债务**: 重构代码审查中发现的问题 (中优先级)
 4. **Phase 7**: 监控告警 (低优先级)

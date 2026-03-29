@@ -1,4 +1,4 @@
-"""MA200 Indicator - 200周均线偏离度."""
+"""MA200 Indicator - 200日均线偏离度."""
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 import pandas as pd
@@ -14,19 +14,19 @@ from app.indicators.registry import register_processor
 @register_processor
 class MA200Indicator(BaseIndicatorProcessor):
     """
-    200周均线偏离度指标.
+    200日均线偏离度指标.
     
-    计算当前价格相对于200周均线的偏离程度。
-    用于判断长期趋势和估值水平。
+    计算当前价格相对于200日均线的偏离程度。
+    用于判断中长期趋势和估值水平。
     
     参数:
-        period: 均线周期，默认200周
+        period: 均线周期，默认200日
         price_field: 使用的价格字段，默认"close"
     """
     
     name = "MA200"
-    display_name = "200周均线偏离度"
-    description = "计算价格相对于200周均线的偏离百分比"
+    display_name = "200日均线偏离度"
+    description = "计算价格相对于200日均线的偏离百分比"
     
     default_params = {
         "period": 200,
@@ -34,7 +34,7 @@ class MA200Indicator(BaseIndicatorProcessor):
     }
     
     param_descriptions = {
-        "period": "均线周期（周数）",
+        "period": "均线周期（天数）",
         "price_field": "使用的价格字段 (open/high/low/close)"
     }
     
@@ -43,7 +43,7 @@ class MA200Indicator(BaseIndicatorProcessor):
         {"name": "value_text", "type": "string", "description": "文本描述", "optional": True},
         {"name": "grade", "type": "string", "description": "档位: very_low/low/medium/high/very_high", "optional": True},
         {"name": "grade_label", "type": "string", "description": "档位标签", "optional": True},
-        {"name": "ma_value", "type": "float", "description": "200周均线值", "optional": True},
+        {"name": "ma_value", "type": "float", "description": "200日均线值", "optional": True},
         {"name": "current_price", "type": "float", "description": "当前价格", "optional": True},
     ]
     
@@ -70,9 +70,8 @@ class MA200Indicator(BaseIndicatorProcessor):
         period = self.params.get("period", 200)
         price_field = self.params.get("price_field", "close")
         
-        # Need extra data for MA calculation
-        # 200 weeks = 1400 days, add buffer
-        buffer_days = period * 7 + 30
+        # Need extra data for MA calculation (200 days + buffer)
+        buffer_days = period + 30
         data_start = start - timedelta(days=buffer_days)
         
         # Fetch price data from database
@@ -87,7 +86,9 @@ class MA200Indicator(BaseIndicatorProcessor):
         finally:
             db.close()
         
-        if len(prices) < period * 5:  # Need at least ~5 days per week
+        # Need at least period + 10 days of data
+        if len(prices) < period + 10:
+            print(f"  Insufficient data: {len(prices)} records, need {period + 10}")
             return []
         
         # Convert to DataFrame
@@ -103,23 +104,19 @@ class MA200Indicator(BaseIndicatorProcessor):
         ])
         df.set_index("date", inplace=True)
         
-        # Resample to weekly data
-        df_weekly = df.resample("W").last()
-        df_weekly[price_field] = df[price_field].resample("W").last()
-        
-        # Calculate 200-week MA
-        df_weekly["ma200"] = df_weekly[price_field].rolling(window=period, min_periods=period).mean()
+        # Calculate 200-day MA directly on daily data
+        df["ma200"] = df[price_field].rolling(window=period, min_periods=period).mean()
         
         # Calculate deviation percentage
-        df_weekly["deviation"] = ((df_weekly[price_field] - df_weekly["ma200"]) / df_weekly["ma200"] * 100)
+        df["deviation"] = ((df[price_field] - df["ma200"]) / df["ma200"] * 100)
         
         # Filter to requested date range
-        df_weekly = df_weekly[df_weekly.index.date >= start]
-        df_weekly = df_weekly[df_weekly.index.date <= end]
+        df = df[df.index >= start]
+        df = df[df.index <= end]
         
         # Convert to results
         results = []
-        for idx, row in df_weekly.iterrows():
+        for idx, row in df.iterrows():
             if pd.isna(row["deviation"]):
                 continue
             
@@ -130,8 +127,8 @@ class MA200Indicator(BaseIndicatorProcessor):
             value_text = self._generate_description(value, grading.get("grade_label"))
             
             results.append(IndicatorResult(
-                date=idx.date(),
-                timestamp=datetime.combine(idx.date(), datetime.min.time()),
+                date=idx if isinstance(idx, date) else idx.date(),
+                timestamp=datetime.combine(idx if isinstance(idx, date) else idx.date(), datetime.min.time()),
                 value=value,
                 value_text=value_text,
                 grade=grading.get("grade"),
