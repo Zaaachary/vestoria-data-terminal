@@ -54,7 +54,11 @@ class SearchResponse(BaseModel):
 
 @router.get("/search/yfinance", response_model=SearchResponse)
 async def search_stocks(
-    q: str = Query(..., description="搜索关键词 (代码或名称)"),
+    q: Optional[str] = Query(None, description="搜索关键词 (代码或名称)"),
+    sector: Optional[str] = Query(None, description="板块筛选 (如: technology)"),
+    industry: Optional[str] = Query(None, description="行业筛选 (如: software)"),
+    sort_by: Optional[str] = Query("market_cap", description="排序字段"),
+    sort_order: Optional[str] = Query("desc", description="排序方向 (asc/desc)"),
     limit: int = Query(20, ge=1, le=100, description="返回数量限制")
 ):
     """
@@ -63,12 +67,41 @@ async def search_stocks(
     支持:
     - 按代码搜索 (如: AAPL, MSFT)
     - 按名称搜索 (如: Apple)
+    - 按板块/行业筛选
     - 预定义股票池优先 (GLD, SPY 等)
     """
-    results = yfinance_service.search_by_symbol(q)
+    results = []
+    
+    # 如果有搜索词，先搜索
+    if q:
+        results = yfinance_service.search_by_symbol(q)
+    
+    # 如果指定了板块，获取板块龙头
+    if sector:
+        sector_results = yfinance_service.get_top_companies_by_sector(sector, limit=limit)
+        if q:
+            # 合并结果（取交集）
+            search_symbols = {r.symbol for r in results}
+            results = [r for r in sector_results if r.symbol in search_symbols]
+        else:
+            results = sector_results
+    
+    # 客户端排序
+    def sort_key(stock):
+        if sort_by == "market_cap":
+            return stock.market_cap or 0
+        elif sort_by == "trailing_pe":
+            return stock.trailing_pe or float('inf')
+        elif sort_by == "name":
+            return stock.name
+        elif sort_by == "ticker":
+            return stock.symbol
+        return stock.market_cap or 0
+    
+    results = sorted(results, key=sort_key, reverse=(sort_order == "desc"))
     
     return SearchResponse(
-        query=q,
+        query=q or "",
         results=[StockInfoResponse(**vars(r)) for r in results[:limit]],
         count=len(results[:limit])
     )
@@ -99,34 +132,30 @@ async def get_industries_by_sector(sector_key: str):
 @router.get("/sectors/{sector_key}/top-companies", response_model=List[StockInfoResponse])
 async def get_top_companies_by_sector(
     sector_key: str,
-    count: int = Query(20, ge=1, le=100, description="返回数量"),
-    sort_by: str = Query("market_cap", enum=["market_cap", "trailing_pe", "name"], description="排序字段")
+    count: int = Query(20, ge=1, le=100, description="返回数量")
 ):
     """
-    获取板块内市值最高的公司
+    获取指定板块下的龙头公司（按市值排序）
     
-    使用 Yahoo Finance 的板块筛选器，按市值排序
-    
-    - sector_key: 板块代码
-    - count: 返回数量 (默认20)
-    - sort_by: 排序方式 (market_cap/trailing_pe/name)
+    - sector_key: 板块代码 (如: technology)
+    - count: 返回公司数量
     """
-    results = yfinance_service.get_top_companies_by_sector(sector_key, count, sort_by)
+    results = yfinance_service.get_top_companies_by_sector(sector_key, limit=count)
     return [StockInfoResponse(**vars(r)) for r in results]
 
 
 @router.get("/industries/{industry_key}/top-companies", response_model=List[StockInfoResponse])
 async def get_top_companies_by_industry(
     industry_key: str,
-    count: int = Query(10, ge=1, le=50, description="返回数量")
+    count: int = Query(20, ge=1, le=100, description="返回数量")
 ):
     """
-    获取子行业内的龙头公司
+    获取指定行业下的龙头公司（按市值排序）
     
-    - industry_key: 子行业代码 (如: software-infrastructure, banks-diversified)
-    - count: 返回数量 (默认10)
+    - industry_key: 行业代码
+    - count: 返回公司数量
     """
-    results = yfinance_service.get_top_companies_by_industry(industry_key, count)
+    results = yfinance_service.get_top_companies_by_industry(industry_key, limit=count)
     return [StockInfoResponse(**vars(r)) for r in results]
 
 

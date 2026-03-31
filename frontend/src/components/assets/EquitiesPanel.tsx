@@ -1,15 +1,35 @@
-import { useState, useEffect } from 'react';
-import { Search, Filter, ArrowUpDown, Plus, Loader2 } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Search, Filter, ArrowUpDown, Plus, Loader2, Check } from 'lucide-react';
 import axios from 'axios';
 import {
   GicsSector,
   YFinanceSearchResult,
-  YFinanceSearchParams,
+  SectorConfig,
   SECTOR_CONFIG,
   SORT_OPTIONS,
 } from '@/types/assets';
 
+// API 基础 URL
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
+// Sector 响应类型
+interface SectorResponse {
+  key: string;
+  name: string;
+  name_zh: string;
+  company_count: number;
+}
+
+// Industry 响应类型
+interface IndustryResponse {
+  key: string;
+  name: string;
+  symbol: string;
+  market_weight?: number;
+}
+
 export default function EquitiesPanel() {
+  // ============ State ============
   // 搜索状态
   const [searchQuery, setSearchQuery] = useState('');
   const [results, setResults] = useState<YFinanceSearchResult[]>([]);
@@ -17,53 +37,247 @@ export default function EquitiesPanel() {
   const [hasSearched, setHasSearched] = useState(false);
 
   // 筛选状态
+  const [sectors, setSectors] = useState<SectorConfig[]>(SECTOR_CONFIG);
+  const [sectorsLoading, setSectorsLoading] = useState(false);
   const [selectedSector, setSelectedSector] = useState<GicsSector | ''>('');
   const [selectedIndustry, setSelectedIndustry] = useState('');
-  const [industries, setIndustries] = useState<string[]>([]);
+  const [industries, setIndustries] = useState<IndustryResponse[]>([]);
+  const [industriesLoading, setIndustriesLoading] = useState(false);
 
   // 排序状态
-  const [sortBy, setSortBy] = useState<YFinanceSearchParams['sortBy']>('market_cap');
+  const [sortBy, setSortBy] = useState<'market_cap' | 'trailing_pe' | 'name' | 'ticker'>('market_cap');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  // 加载 Industries（根据 Sector 筛选）
+  // 添加状态
+  const [addingSymbol, setAddingSymbol] = useState<string | null>(null);
+  const [addedSymbols, setAddedSymbols] = useState<Set<string>>(new Set());
+
+  // 防抖定时器
+  const searchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ============ Effects ============
+  // 加载 Sector 列表
   useEffect(() => {
-    // 这里后续可以从后端加载 industries
-    // 暂时根据 sector 返回一些常见 industry
+    loadSectors();
+  }, []);
+
+  // Sector 变化时加载 Industries
+  useEffect(() => {
     if (selectedSector) {
-      const sectorIndustries = getIndustriesBySector(selectedSector);
-      setIndustries(sectorIndustries);
-      setSelectedIndustry(''); // 清空已选 industry
+      loadIndustries(selectedSector);
     } else {
       setIndustries([]);
       setSelectedIndustry('');
     }
   }, [selectedSector]);
 
-  // 搜索函数
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
+  // ============ API Functions ============
+  // 加载 Sectors
+  const loadSectors = async () => {
+    setSectorsLoading(true);
+    try {
+      const response = await axios.get<SectorResponse[]>(`${API_BASE_URL}/api/v1/assets/sectors`);
+      // 合并后端数据与前端配置
+      const mergedSectors = response.data.map((s) => {
+        const config = SECTOR_CONFIG.find((c) => c.key === s.name);
+        return {
+          key: s.name as GicsSector,
+          label: s.name,
+          labelZh: s.name_zh || config?.labelZh || s.name,
+          color: config?.color || '#6366f1',
+          bg: config?.bg || 'rgba(99, 102, 241, 0.1)',
+        };
+      });
+      setSectors(mergedSectors);
+    } catch (error) {
+      console.error('Failed to load sectors:', error);
+      // 失败时使用默认配置
+      setSectors(SECTOR_CONFIG);
+    } finally {
+      setSectorsLoading(false);
+    }
+  };
+
+  // 加载 Industries
+  const loadIndustries = async (sectorKey: GicsSector) => {
+    setIndustriesLoading(true);
+    try {
+      // 转换 GICS 名称为 yfinance key
+      const sectorKeyMap: Record<string, string> = {
+        'Technology': 'technology',
+        'Financials': 'financial-services',
+        'Health Care': 'healthcare',
+        'Consumer Discretionary': 'consumer-cyclical',
+        'Communication Services': 'communication-services',
+        'Industrials': 'industrials',
+        'Consumer Staples': 'consumer-defensive',
+        'Energy': 'energy',
+        'Materials': 'basic-materials',
+        'Real Estate': 'real-estate',
+        'Utilities': 'utilities',
+      };
+      const yfKey = sectorKeyMap[sectorKey] || sectorKey.toLowerCase().replace(/\s+/g, '-');
+      
+      const response = await axios.get<IndustryResponse[]>(
+        `${API_BASE_URL}/api/v1/assets/sectors/${yfKey}/industries`
+      );
+      setIndustries(response.data);
+    } catch (error) {
+      console.error('Failed to load industries:', error);
+      setIndustries([]);
+    } finally {
+      setIndustriesLoading(false);
+    }
+  };
+
+  // 搜索股票
+  const searchStocks = async () => {
+    if (!searchQuery.trim() && !selectedSector) return;
     
     setLoading(true);
     setHasSearched(true);
+    
     try {
-      const response = await axios.get('/api/v1/assets/search/yfinance', {
-        params: {
-          q: searchQuery,
-          sector: selectedSector || undefined,
-          industry: selectedIndustry || undefined,
-          sort_by: sortBy,
-          sort_order: sortOrder,
-          limit: 50,
-        },
-      });
-      setResults(response.data);
+      let searchResults: YFinanceSearchResult[] = [];
+      
+      // 如果有搜索词，使用搜索 API
+      if (searchQuery.trim()) {
+        const response = await axios.get(`${API_BASE_URL}/api/v1/assets/search/yfinance`, {
+          params: {
+            q: searchQuery,
+            limit: 50,
+          },
+        });
+        searchResults = response.data.results || [];
+      }
+      
+      // 如果有选择 Sector，获取该板块龙头
+      if (selectedSector) {
+        const sectorKeyMap: Record<string, string> = {
+          'Technology': 'technology',
+          'Financials': 'financial-services',
+          'Health Care': 'healthcare',
+          'Consumer Discretionary': 'consumer-cyclical',
+          'Communication Services': 'communication-services',
+          'Industrials': 'industrials',
+          'Consumer Staples': 'consumer-defensive',
+          'Energy': 'energy',
+          'Materials': 'basic-materials',
+          'Real Estate': 'real-estate',
+          'Utilities': 'utilities',
+        };
+        const yfKey = sectorKeyMap[selectedSector] || selectedSector.toLowerCase().replace(/\s+/g, '-');
+        
+        const response = await axios.get(`${API_BASE_URL}/api/v1/assets/sectors/${yfKey}/top-companies`, {
+          params: { count: 50 },
+        });
+        
+        if (!searchQuery.trim()) {
+          // 只有 sector 筛选时，直接使用板块结果
+          searchResults = response.data || [];
+        } else {
+          // 合并结果（去重）
+          const sectorSymbols = new Set((response.data || []).map((s: YFinanceSearchResult) => s.symbol));
+          searchResults = searchResults.filter((s) => sectorSymbols.has(s.symbol));
+        }
+      }
+      
+      // 客户端排序
+      const sortedResults = sortResults(searchResults, sortBy, sortOrder);
+      setResults(sortedResults);
     } catch (error) {
       console.error('Search failed:', error);
-      // 如果后端还没实现，先用模拟数据
-      setResults(getMockResults());
+      setResults([]);
     } finally {
       setLoading(false);
     }
+  };
+
+  // 排序结果
+  const sortResults = (
+    items: YFinanceSearchResult[],
+    sortField: string,
+    order: 'asc' | 'desc'
+  ): YFinanceSearchResult[] => {
+    return [...items].sort((a, b) => {
+      let aVal: number | string | undefined;
+      let bVal: number | string | undefined;
+      
+      switch (sortField) {
+        case 'market_cap':
+          aVal = a.marketCap;
+          bVal = b.marketCap;
+          break;
+        case 'trailing_pe':
+          aVal = a.trailingPE;
+          bVal = b.trailingPE;
+          break;
+        case 'name':
+          aVal = a.name;
+          bVal = b.name;
+          break;
+        case 'ticker':
+          aVal = a.symbol;
+          bVal = b.symbol;
+          break;
+        default:
+          aVal = a.marketCap;
+          bVal = b.marketCap;
+      }
+      
+      if (aVal === undefined && bVal === undefined) return 0;
+      if (aVal === undefined) return 1;
+      if (bVal === undefined) return -1;
+      
+      const comparison = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
+      return order === 'asc' ? comparison : -comparison;
+    });
+  };
+
+  // 添加到追踪列表
+  const handleAddToWatchlist = async (stock: YFinanceSearchResult) => {
+    if (addingSymbol || addedSymbols.has(stock.symbol)) return;
+    
+    setAddingSymbol(stock.symbol);
+    try {
+      await axios.post(`${API_BASE_URL}/api/v1/assets`, {
+        id: stock.symbol,
+        symbol: stock.symbol,
+        name: stock.name,
+        asset_type: 'equity',
+        exchange: stock.exchange || 'US',
+        currency: stock.currency || 'USD',
+      });
+      
+      setAddedSymbols((prev) => new Set([...prev, stock.symbol]));
+    } catch (error) {
+      console.error('Failed to add asset:', error);
+      // 如果已经存在（409），也算成功
+      if (axios.isAxiosError(error) && error.response?.status === 400) {
+        setAddedSymbols((prev) => new Set([...prev, stock.symbol]));
+      }
+    } finally {
+      setAddingSymbol(null);
+    }
+  };
+
+  // ============ Event Handlers ============
+  // 防抖搜索
+  const debouncedSearch = useCallback(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    searchTimeoutRef.current = setTimeout(() => {
+      searchStocks();
+    }, 300);
+  }, [searchQuery, selectedSector, selectedIndustry, sortBy, sortOrder]);
+
+  // 立即搜索
+  const handleSearch = () => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    searchStocks();
   };
 
   // 格式化市值
@@ -75,9 +289,9 @@ export default function EquitiesPanel() {
     return `$${value.toLocaleString()}`;
   };
 
-  // 获取 sector 颜色
+  // 获取 sector 配置
   const getSectorConfig = (sector?: string) => {
-    return SECTOR_CONFIG.find((s) => s.key === sector) || {
+    return sectors.find((s) => s.key === sector) || {
       label: sector || 'Unknown',
       labelZh: sector || '未知',
       color: '#6366f1',
@@ -119,7 +333,10 @@ export default function EquitiesPanel() {
               type="text"
               placeholder="搜索股票代码或名称 (如: AAPL, Apple)..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                debouncedSearch();
+              }}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
               style={{
                 flex: 1,
@@ -133,7 +350,7 @@ export default function EquitiesPanel() {
           </div>
           <button
             onClick={handleSearch}
-            disabled={loading || !searchQuery.trim()}
+            disabled={loading}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -162,6 +379,7 @@ export default function EquitiesPanel() {
             <select
               value={selectedSector}
               onChange={(e) => setSelectedSector(e.target.value as GicsSector | '')}
+              disabled={sectorsLoading}
               style={{
                 padding: '8px 12px',
                 borderRadius: '8px',
@@ -169,11 +387,12 @@ export default function EquitiesPanel() {
                 background: 'var(--bg-primary)',
                 fontSize: '13px',
                 color: 'var(--text-primary)',
-                cursor: 'pointer',
+                cursor: sectorsLoading ? 'not-allowed' : 'pointer',
+                opacity: sectorsLoading ? 0.7 : 1,
               }}
             >
               <option value="">所有板块</option>
-              {SECTOR_CONFIG.map((sector) => (
+              {sectors.map((sector) => (
                 <option key={sector.key} value={sector.key}>
                   {sector.labelZh}
                 </option>
@@ -186,6 +405,7 @@ export default function EquitiesPanel() {
             <select
               value={selectedIndustry}
               onChange={(e) => setSelectedIndustry(e.target.value)}
+              disabled={industriesLoading}
               style={{
                 padding: '8px 12px',
                 borderRadius: '8px',
@@ -193,13 +413,14 @@ export default function EquitiesPanel() {
                 background: 'var(--bg-primary)',
                 fontSize: '13px',
                 color: 'var(--text-primary)',
-                cursor: 'pointer',
+                cursor: industriesLoading ? 'not-allowed' : 'pointer',
+                opacity: industriesLoading ? 0.7 : 1,
               }}
             >
               <option value="">所有行业</option>
               {industries.map((ind) => (
-                <option key={ind} value={ind}>
-                  {ind}
+                <option key={ind.key} value={ind.key}>
+                  {ind.name}
                 </option>
               ))}
             </select>
@@ -210,7 +431,13 @@ export default function EquitiesPanel() {
             <ArrowUpDown size={16} color="var(--text-muted)" />
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as YFinanceSearchParams['sortBy'])}
+              onChange={(e) => {
+                const newSortBy = e.target.value as typeof sortBy;
+                setSortBy(newSortBy);
+                if (results.length > 0) {
+                  setResults(sortResults(results, newSortBy, sortOrder));
+                }
+              }}
               style={{
                 padding: '8px 12px',
                 borderRadius: '8px',
@@ -228,7 +455,13 @@ export default function EquitiesPanel() {
               ))}
             </select>
             <button
-              onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+              onClick={() => {
+                const newOrder = sortOrder === 'asc' ? 'desc' : 'asc';
+                setSortOrder(newOrder);
+                if (results.length > 0) {
+                  setResults(sortResults(results, sortBy, newOrder));
+                }
+              }}
               style={{
                 padding: '8px 12px',
                 borderRadius: '8px',
@@ -280,6 +513,9 @@ export default function EquitiesPanel() {
                 <tbody>
                   {results.map((stock, index) => {
                     const sectorConfig = getSectorConfig(stock.sector);
+                    const isAdded = addedSymbols.has(stock.symbol);
+                    const isAdding = addingSymbol === stock.symbol;
+                    
                     return (
                       <tr
                         key={stock.symbol}
@@ -369,6 +605,8 @@ export default function EquitiesPanel() {
                         </td>
                         <td style={{ ...tdStyle, textAlign: 'center' }}>
                           <button
+                            onClick={() => handleAddToWatchlist(stock)}
+                            disabled={isAdding || isAdded}
                             style={{
                               display: 'inline-flex',
                               alignItems: 'center',
@@ -376,15 +614,24 @@ export default function EquitiesPanel() {
                               padding: '6px 12px',
                               borderRadius: '6px',
                               border: 'none',
-                              background: 'var(--primary-color)',
+                              background: isAdded 
+                                ? 'var(--success-color, #22c55e)' 
+                                : 'var(--primary-color)',
                               color: 'white',
                               fontSize: '12px',
                               fontWeight: 500,
-                              cursor: 'pointer',
+                              cursor: (isAdding || isAdded) ? 'not-allowed' : 'pointer',
+                              opacity: (isAdding || isAdded) ? 0.7 : 1,
                             }}
                           >
-                            <Plus size={14} />
-                            添加
+                            {isAdding ? (
+                              <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                            ) : isAdded ? (
+                              <Check size={14} />
+                            ) : (
+                              <Plus size={14} />
+                            )}
+                            {isAdded ? '已添加' : '添加'}
                           </button>
                         </td>
                       </tr>
@@ -414,35 +661,3 @@ const thStyle: React.CSSProperties = {
 const tdStyle: React.CSSProperties = {
   padding: '14px 16px',
 };
-
-// 根据 sector 获取 industries（临时实现）
-function getIndustriesBySector(sector: GicsSector): string[] {
-  const map: Record<GicsSector, string[]> = {
-    'Technology': ['Software', 'Semiconductors', 'IT Services', 'Hardware', 'Electronic Components'],
-    'Financials': ['Banks', 'Insurance', 'Asset Management', 'Investment Banking', 'Consumer Finance'],
-    'Health Care': ['Pharmaceuticals', 'Biotechnology', 'Medical Devices', 'Health Care Providers'],
-    'Consumer Discretionary': ['Internet Retail', 'Auto Manufacturers', 'Hotels & Resorts', 'Apparel Retail'],
-    'Communication Services': ['Interactive Media', 'Entertainment', 'Telecom', 'Publishing'],
-    'Industrials': ['Aerospace & Defense', 'Machinery', 'Airlines', 'Railroads', 'Construction'],
-    'Consumer Staples': ['Beverages', 'Food Products', 'Household Products', 'Personal Products'],
-    'Energy': ['Oil & Gas Integrated', 'Oil & Gas E&P', 'Oil & Gas Equipment', 'Renewables'],
-    'Utilities': ['Electric Utilities', 'Gas Utilities', 'Water Utilities', 'Multi-Utilities'],
-    'Real Estate': ['REITs', 'Real Estate Services', 'Real Estate Development'],
-    'Materials': ['Chemicals', 'Metals & Mining', 'Paper & Forest', 'Construction Materials'],
-  };
-  return map[sector] || [];
-}
-
-// 模拟数据（后端实现前使用）
-function getMockResults(): YFinanceSearchResult[] {
-  return [
-    { symbol: 'AAPL', name: 'Apple Inc.', sector: 'Technology', industry: 'Hardware', marketCap: 3500000000000, trailingPE: 32.5, price: 189.52 },
-    { symbol: 'MSFT', name: 'Microsoft Corporation', sector: 'Technology', industry: 'Software', marketCap: 3200000000000, trailingPE: 36.2, price: 430.12 },
-    { symbol: 'NVDA', name: 'NVIDIA Corporation', sector: 'Technology', industry: 'Semiconductors', marketCap: 2800000000000, trailingPE: 72.8, price: 890.15 },
-    { symbol: 'GOOGL', name: 'Alphabet Inc.', sector: 'Communication Services', industry: 'Interactive Media', marketCap: 2100000000000, trailingPE: 25.3, price: 168.42 },
-    { symbol: 'AMZN', name: 'Amazon.com Inc.', sector: 'Consumer Discretionary', industry: 'Internet Retail', marketCap: 1900000000000, trailingPE: 58.6, price: 178.25 },
-    { symbol: 'META', name: 'Meta Platforms Inc.', sector: 'Communication Services', industry: 'Interactive Media', marketCap: 1400000000000, trailingPE: 28.4, price: 512.35 },
-    { symbol: 'JPM', name: 'JPMorgan Chase & Co.', sector: 'Financials', industry: 'Banks', marketCap: 580000000000, trailingPE: 12.1, price: 195.42 },
-    { symbol: 'LLY', name: 'Eli Lilly and Company', sector: 'Health Care', industry: 'Pharmaceuticals', marketCap: 720000000000, trailingPE: 128.5, price: 765.18 },
-  ];
-}
