@@ -140,7 +140,7 @@ async def get_top_companies_by_sector(
     - sector_key: 板块代码 (如: technology)
     - count: 返回公司数量
     """
-    results = yfinance_service.get_top_companies_by_sector(sector_key, limit=count)
+    results = yfinance_service.get_top_companies_by_sector(sector_key, count=count)
     return [StockInfoResponse(**vars(r)) for r in results]
 
 
@@ -155,7 +155,7 @@ async def get_top_companies_by_industry(
     - industry_key: 行业代码
     - count: 返回公司数量
     """
-    results = yfinance_service.get_top_companies_by_industry(industry_key, limit=count)
+    results = yfinance_service.get_top_companies_by_industry(industry_key, count=count)
     return [StockInfoResponse(**vars(r)) for r in results]
 
 

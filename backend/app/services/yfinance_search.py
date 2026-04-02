@@ -264,62 +264,56 @@ class YFinanceSearchService:
     
     @classmethod
     def get_top_companies_by_sector(
-        cls, 
-        sector_key: str, 
+        cls,
+        sector_key: str,
         count: int = 20,
         sort_by: str = 'market_cap'
     ) -> List[StockInfo]:
         """
         获取板块内市值最高的公司
-        
-        使用 yfinance.screen 进行板块筛选
+
+        使用 yfinance.Sector.top_companies 获取板块龙头
         """
         cache_key = f"top_sector:{sector_key}:{count}:{sort_by}"
         cached = _get_from_cache(cache_key)
         if cached:
             return cached
-        
+
         if sector_key not in cls.SECTOR_KEY_MAP:
             return []
-        
+
         try:
-            # 构建查询: sector + US market
-            sector_name = cls.SECTOR_KEY_MAP[sector_key].replace(' ', '')
-            query = EquityQuery('and', [
-                EquityQuery('eq', ['sector', sector_name]),
-                EquityQuery('eq', ['region', 'us'])
-            ])
-            
-            # 排序字段映射
-            sort_field_map = {
-                'market_cap': 'intradaymarketcap',
-                'trailing_pe': 'trailingpe',
-                'name': 'shortname',
-            }
-            sort_field = sort_field_map.get(sort_by, 'intradaymarketcap')
-            
-            result = yf.screen(query, size=max(count, 100), sortField=sort_field, sortAsc=False)
-            quotes = result.get('quotes', [])
-            
+            sector = yf.Sector(sector_key)
+            top_companies = sector.top_companies
+
             stocks = []
-            for item in quotes[:count]:
-                symbol = item.get('symbol')
-                if symbol:
-                    stocks.append(StockInfo(
-                        symbol=symbol,
-                        name=item.get('longName') or item.get('shortName', symbol),
-                        sector=cls.SECTOR_KEY_MAP.get(sector_key),
-                        market_cap=item.get('marketCap'),
-                        trailing_pe=item.get('trailingPE'),
-                        price=item.get('regularMarketPrice'),
-                        currency='USD',
-                    ))
-            
+            if hasattr(top_companies, 'iterrows'):
+                for symbol, _ in list(top_companies.iterrows())[:count]:
+                    stock = cls._get_stock_info(symbol)
+                    if stock:
+                        # 补充 sector 信息
+                        if not stock.sector:
+                            stock.sector = cls.SECTOR_KEY_MAP.get(sector_key)
+                        stocks.append(stock)
+
+            # 客户端排序（默认按市值降序）
+            def sort_key(stock):
+                if sort_by == 'market_cap':
+                    return stock.market_cap or 0
+                elif sort_by == 'trailing_pe':
+                    return stock.trailing_pe or float('inf')
+                elif sort_by == 'name':
+                    return stock.name
+                elif sort_by == 'ticker':
+                    return stock.symbol
+                return stock.market_cap or 0
+
+            stocks = sorted(stocks, key=sort_key, reverse=True)
             _set_cache(cache_key, stocks)
             return stocks
-            
+
         except Exception as e:
-            print(f"Failed to screen sector {sector_key}: {e}")
+            print(f"Failed to get top companies for sector {sector_key}: {e}")
             return []
     
     @classmethod
