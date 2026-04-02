@@ -10,11 +10,12 @@ Usage:
     python -m app.cli status
 """
 import sys
+from pathlib import Path
 import argparse
 from datetime import date, datetime, timedelta
 from typing import List
 
-sys.path.insert(0, '/home/linuxuser/.openclaw/workspace-vestoria/projects/data-terminal/backend')
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.database import SessionLocal
 from app.models.asset import Asset

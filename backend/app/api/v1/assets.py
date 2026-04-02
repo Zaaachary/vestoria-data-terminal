@@ -74,7 +74,7 @@ async def search_stocks(
     
     # 如果有搜索词，先搜索
     if q:
-        results = yfinance_service.search_by_symbol(q)
+        results = yfinance_service.search_by_symbol(q, limit=limit)
     
     # 如果指定了板块，获取板块龙头
     if sector:

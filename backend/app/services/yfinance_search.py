@@ -13,6 +13,16 @@ from dataclasses import dataclass
 import functools
 import time
 
+from app.core.config import settings
+
+# Configure yfinance proxy if set
+if settings.PROXY_URL:
+    yf.config.network.proxy = {
+        "http": settings.PROXY_URL,
+        "https": settings.PROXY_URL,
+    }
+    print(f"[yfinance] Proxy configured: {settings.PROXY_URL}")
+
 
 @dataclass
 class StockInfo:
@@ -109,28 +119,53 @@ class YFinanceSearchService:
     SECTOR_KEY_REVERSE = {v: k for k, v in SECTOR_KEY_MAP.items()}
     
     @staticmethod
-    def search_by_symbol(query: str) -> List[StockInfo]:
+    def search_by_symbol(query: str, limit: int = 20) -> List[StockInfo]:
         """
         按代码或名称搜索股票
         
-        1. 先查预定义股票池
-        2. 再用 yfinance.Ticker 获取详情
+        搜索结果只通过 yfinance 接口获取：
+        1. 若输入像是股票代码，先用 yfinance.Ticker 获取详情
+        2. 再用 yfinance.Search 做模糊搜索
         """
         results = []
+        seen_symbols = set()
         query_upper = query.upper()
         
-        # 1. 检查预定义池
-        for symbol, info in PREDEFINED_TICKERS.items():
-            if query_upper in symbol or query_upper in info["name"].upper():
-                stock = YFinanceSearchService._get_stock_info(symbol)
-                if stock:
-                    results.append(stock)
+        # 1. 直接尝试获取 ticker 信息 (仅当输入明显是代码: 全大写、<=5字母)
+        looks_like_ticker = len(query) <= 5 and query.isalpha() and query == query.upper()
+        if looks_like_ticker:
+            direct_match = YFinanceSearchService._get_stock_info(query_upper)
+            if direct_match:
+                results.append(direct_match)
+                seen_symbols.add(direct_match.symbol)
         
-        # 2. 直接尝试获取 ticker 信息 (如果输入像是有效代码)
-        if len(query) <= 5 and query.isalpha():
-            stock = YFinanceSearchService._get_stock_info(query_upper)
-            if stock and stock not in results:
-                results.append(stock)
+        # 2. 模糊搜索 (当没有直接匹配，或输入不像标准代码时)
+        if not looks_like_ticker or not results:
+            try:
+                search = yf.Search(query, max_results=limit, raise_errors=True)
+                for quote in search.quotes:
+                    symbol = quote.get("symbol")
+                    if not symbol or symbol in seen_symbols:
+                        continue
+                    # 过滤：优先股票/ETF，排除货币等
+                    quote_type = quote.get("quoteType", "").lower()
+                    if quote_type not in ("equity", "etf", "mutualfund", "index", ""):
+                        continue
+                    stock = StockInfo(
+                        symbol=symbol,
+                        name=quote.get("longname") or quote.get("shortname", symbol),
+                        sector=None,
+                        industry=None,
+                        market_cap=quote.get("marketCap"),
+                        trailing_pe=None,
+                        price=quote.get("regularMarketPrice"),
+                        currency=quote.get("currency", "USD"),
+                        exchange=quote.get("exchange"),
+                    )
+                    results.append(stock)
+                    seen_symbols.add(symbol)
+            except Exception as e:
+                print(f"Search failed for '{query}': {e}")
         
         return results
     
