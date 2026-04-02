@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.asset import Asset
+from app.models.sector import Sector, Industry, SectorTopCompany, IndustryTopCompany
 from app.schemas.asset import AssetCreate, AssetUpdate, AssetResponse
 from app.services.yfinance_search import yfinance_service
 
@@ -108,25 +109,41 @@ async def search_stocks(
 
 
 @router.get("/sectors", response_model=List[SectorResponse])
-async def get_sectors():
+async def get_sectors(db: Session = Depends(get_db)):
     """
     获取所有 GICS 板块
     
-    返回 11 个标准 GICS 板块及其基本信息
+    返回 11 个标准 GICS 板块及其基本信息（从本地数据库读取）
     """
-    sectors = yfinance_service.get_sectors()
-    return [SectorResponse(**s) for s in sectors]
+    sectors = db.query(Sector).order_by(Sector.name).all()
+    return [
+        SectorResponse(
+            key=s.key,
+            name=s.name,
+            name_zh=s.name_zh or s.name,
+            company_count=s.company_count or 0,
+        )
+        for s in sectors
+    ]
 
 
 @router.get("/sectors/{sector_key}/industries", response_model=List[IndustryResponse])
-async def get_industries_by_sector(sector_key: str):
+async def get_industries_by_sector(sector_key: str, db: Session = Depends(get_db)):
     """
     获取指定板块下的所有子行业
     
     - sector_key: 板块代码 (如: technology, financial-services)
     """
-    industries = yfinance_service.get_industries_by_sector(sector_key)
-    return [IndustryResponse(**i) for i in industries]
+    industries = db.query(Industry).filter(Industry.sector_key == sector_key).order_by(Industry.name).all()
+    return [
+        IndustryResponse(
+            key=i.key,
+            name=i.name,
+            symbol=i.symbol or "",
+            market_weight=i.market_weight,
+        )
+        for i in industries
+    ]
 
 
 @router.get("/sectors/{sector_key}/top-companies", response_model=List[StockInfoResponse])

@@ -24,6 +24,7 @@ from app.models.price_data import PriceData
 from app.services.backfill import backfill_all_assets, incremental_update
 from app.services.price_scheduler import run_price_update
 from app.services.indicator_scheduler import calculate_all_indicators, calculate_indicator_latest, fetch_external_indicator, fetch_latest_external_indicator
+from app.services.sector_sync import sync_all as sync_sectors_all
 
 
 def cmd_fill_history(args):
@@ -245,7 +246,10 @@ def main():
     
     # status command
     subparsers.add_parser("status", help="Show system status")
-    
+
+    # sync-sectors command
+    subparsers.add_parser("sync-sectors", help="Sync sectors, industries and top companies from yfinance")
+
     args = parser.parse_args()
     
     if args.command == "fill-history":
@@ -258,6 +262,14 @@ def main():
         cmd_fetch_indicator(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "sync-sectors":
+        print("Syncing sectors, industries and top companies...")
+        print("-" * 50)
+        result = sync_sectors_all()
+        print("\nSummary:")
+        for key, val in result.items():
+            status = "✓" if val.get("status") == "success" else "✗"
+            print(f"  {status} {key}: {val}")
     else:
         parser.print_help()
 
