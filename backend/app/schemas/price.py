@@ -40,6 +40,21 @@ class PriceHistoryRequest(BaseModel):
     interval: str = "1d"
 
 
+class SparklineData(BaseModel):
+    """Single price point for sparkline chart."""
+    date: date
+    close: float
+
+
+class SparklineResponse(BaseModel):
+    """Sparkline data for watchlist."""
+    asset_id: str
+    symbol: str
+    data: List[SparklineData]
+    days: int
+    change_percent: Optional[float] = None  # Overall change over the period
+
+
 class LatestPriceResponse(BaseModel):
     """Latest price response for watchlist."""
     asset_id: str

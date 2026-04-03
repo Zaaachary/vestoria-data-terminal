@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import axios from 'axios';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
+import Sparkline from '@/components/Sparkline';
 
 // Enable dayjs plugins
 dayjs.extend(relativeTime);
@@ -50,8 +51,25 @@ interface BackfillResult {
   message: string;
 }
 
+interface SparklinePoint {
+  date: string;
+  close: number;
+}
+
+interface SparklineData {
+  asset_id: string;
+  symbol: string;
+  data: SparklinePoint[];
+  days: number;
+  change_percent?: number;
+}
+
+interface AssetWithSparkline extends MergedAsset {
+  sparkline?: SparklineData;
+}
+
 export default function Watchlist() {
-  const [assets, setAssets] = useState<MergedAsset[]>([]);
+  const [assets, setAssets] = useState<AssetWithSparkline[]>([]);
   const [loading, setLoading] = useState(true);
   const [priceLoading, setPriceLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -64,7 +82,7 @@ export default function Watchlist() {
   const missingPriceCount = assets.filter(a => !a.price).length;
   const hasMissingPrices = missingPriceCount > 0;
 
-  // Load watchlist (assets + prices)
+  // Load watchlist (assets + prices + sparklines)
   const loadWatchlist = useCallback(async () => {
     setLoading(true);
     try {
@@ -72,20 +90,32 @@ export default function Watchlist() {
       const assetsResponse = await axios.get<Asset[]>(`${API_BASE_URL}/api/v1/assets`);
       const assetsData = assetsResponse.data || [];
 
-      // Step 2: Load prices (if we have assets)
+      // Step 2: Load prices and sparklines (if we have assets)
       if (assetsData.length > 0) {
         const assetIds = assetsData.map(a => a.id).join(',');
+        
         try {
-          const pricesResponse = await axios.get<PriceInfo[]>(
-            `${API_BASE_URL}/api/v1/prices/latest/batch?asset_ids=${assetIds}`
-          );
-          const pricesData = pricesResponse.data || [];
+          // Fetch both latest prices and sparkline data in parallel
+          const [pricesResponse, sparklineResponse] = await Promise.all([
+            axios.get<PriceInfo[]>(
+              `${API_BASE_URL}/api/v1/prices/latest/batch?asset_ids=${assetIds}`
+            ),
+            axios.get<SparklineData[]>(
+              `${API_BASE_URL}/api/v1/prices/sparkline/batch?asset_ids=${assetIds}&days=7`
+            ).catch(() => ({ data: [] })) // Sparkline is optional
+          ]);
           
-          // Merge assets with prices
+          const pricesData = pricesResponse.data || [];
+          const sparklineData = sparklineResponse.data || [];
+          
+          // Merge assets with prices and sparklines
           const priceMap = new Map(pricesData.map(p => [p.asset_id, p]));
+          const sparklineMap = new Map(sparklineData.map(s => [s.asset_id, s]));
+          
           const mergedAssets = assetsData.map(asset => ({
             ...asset,
-            price: priceMap.get(asset.id)
+            price: priceMap.get(asset.id),
+            sparkline: sparklineMap.get(asset.id)
           }));
           
           setAssets(mergedAssets);
@@ -495,6 +525,7 @@ export default function Watchlist() {
                 <th style={thStyle}>标的</th>
                 <th style={{ ...thStyle, textAlign: 'right' }}>价格</th>
                 <th style={{ ...thStyle, textAlign: 'right' }}>涨跌</th>
+                <th style={{ ...thStyle, textAlign: 'center' }}>7日走势</th>
                 <th style={thStyle}>类型</th>
                 <th style={{ ...thStyle, textAlign: 'center' }}>状态</th>
                 <th style={{ ...thStyle, textAlign: 'center' }}>操作</th>
@@ -651,6 +682,22 @@ export default function Watchlist() {
                       ) : (
                         <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
                           无数据
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Sparkline - 7 Day Trend */}
+                    <td style={{ ...tdStyle, textAlign: 'center' }}>
+                      {asset.sparkline && asset.sparkline.data.length > 1 ? (
+                        <Sparkline
+                          data={asset.sparkline.data}
+                          width={100}
+                          height={32}
+                          isPositive={(asset.sparkline.change_percent || 0) >= 0}
+                        />
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>
+                          -
                         </span>
                       )}
                     </td>

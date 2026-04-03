@@ -8,7 +8,7 @@ from sqlalchemy import desc, func
 from app.core.database import get_db
 from app.models.price_data import PriceData
 from app.models.asset import Asset
-from app.schemas.price import PriceResponse, LatestPriceResponse
+from app.schemas.price import PriceResponse, LatestPriceResponse, SparklineResponse, SparklineData
 
 router = APIRouter(prefix="/prices", tags=["prices"])
 
@@ -134,6 +134,88 @@ def get_latest_prices_batch(
             date=latest.date,
             last_updated=latest.created_at or datetime.utcnow(),
             data_freshness=freshness
+        ))
+    
+    return results
+
+
+@router.get("/sparkline/batch", response_model=List[SparklineResponse])
+def get_sparkline_batch(
+    asset_ids: str = Query(..., description="Comma-separated asset IDs (e.g., BTC-USD,SPY,AAPL)"),
+    days: int = Query(7, ge=2, le=30, description="Number of days for sparkline (default: 7, max: 30)"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get sparkline (mini chart) data for multiple assets.
+    
+    Returns the last N days of closing prices for each asset, suitable for
+    rendering mini line charts in the watchlist.
+    
+    Args:
+        asset_ids: Comma-separated list of asset IDs
+        days: Number of days to include (2-30, default 7)
+    
+    Returns:
+        List of sparkline data for each asset with price history
+    """
+    if not asset_ids:
+        return []
+    
+    # Parse asset_ids
+    id_list = [id.strip() for id in asset_ids.split(",") if id.strip()]
+    
+    if not id_list:
+        return []
+    
+    # Get all assets info
+    assets = db.query(Asset).filter(Asset.id.in_(id_list)).all()
+    asset_map = {a.id: a for a in assets}
+    
+    # Calculate date range
+    end_date = date.today()
+    start_date = end_date - timedelta(days=days + 5)  # Get a few extra days to ensure we have enough data
+    
+    results = []
+    
+    for asset_id in id_list:
+        asset = asset_map.get(asset_id)
+        if not asset:
+            continue
+        
+        # Get price history for the date range
+        prices = db.query(PriceData).filter(
+            PriceData.asset_id == asset_id,
+            PriceData.interval == "1d",
+            PriceData.date >= start_date,
+            PriceData.date <= end_date
+        ).order_by(PriceData.date.asc()).all()
+        
+        if not prices:
+            continue
+        
+        # Take the last 'days' entries
+        recent_prices = prices[-days:] if len(prices) > days else prices
+        
+        # Calculate overall change percent
+        change_percent = None
+        if len(recent_prices) >= 2:
+            first_price = recent_prices[0].close
+            last_price = recent_prices[-1].close
+            if first_price > 0:
+                change_percent = round(((last_price - first_price) / first_price) * 100, 2)
+        
+        # Build sparkline data
+        sparkline_data = [
+            SparklineData(date=p.date, close=p.close)
+            for p in recent_prices
+        ]
+        
+        results.append(SparklineResponse(
+            asset_id=asset_id,
+            symbol=asset.symbol,
+            data=sparkline_data,
+            days=len(sparkline_data),
+            change_percent=change_percent
         ))
     
     return results
