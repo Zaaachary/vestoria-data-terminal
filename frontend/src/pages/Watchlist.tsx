@@ -1,9 +1,18 @@
-import { useState, useEffect } from 'react';
-import { Star, Plus, TrendingUp, TrendingDown, Trash2, ExternalLink } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Star, Plus, TrendingUp, TrendingDown, Trash2, ExternalLink, RefreshCw, AlertCircle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+
+// Enable dayjs plugins
+dayjs.extend(relativeTime);
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+
+// Constants
+const AUTO_REFRESH_INTERVAL = 60 * 1000; // 60 seconds
+const FRESHNESS_THRESHOLD = 24 * 60 * 60 * 1000; // 24 hours
 
 interface Asset {
   id: string;
@@ -16,30 +25,118 @@ interface Asset {
   created_at: string;
 }
 
+interface PriceInfo {
+  asset_id: string;
+  symbol: string;
+  close: number;
+  open?: number;
+  high?: number;
+  low?: number;
+  volume?: number;
+  change?: number;
+  change_percent?: number;
+  date: string;
+  last_updated: string;
+  data_freshness: 'fresh' | 'stale' | 'outdated';
+}
+
+interface MergedAsset extends Asset {
+  price?: PriceInfo;
+}
+
 export default function Watchlist() {
-  const [assets, setAssets] = useState<Asset[]>([]);
+  const [assets, setAssets] = useState<MergedAsset[]>([]);
   const [loading, setLoading] = useState(true);
+  const [priceLoading, setPriceLoading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // 加载关注列表
-  useEffect(() => {
-    loadWatchlist();
-  }, []);
-
-  const loadWatchlist = async () => {
+  // Load watchlist (assets + prices)
+  const loadWatchlist = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await axios.get(`${API_BASE_URL}/api/v1/assets`);
-      setAssets(response.data || []);
+      // Step 1: Load assets
+      const assetsResponse = await axios.get<Asset[]>(`${API_BASE_URL}/api/v1/assets`);
+      const assetsData = assetsResponse.data || [];
+
+      // Step 2: Load prices (if we have assets)
+      if (assetsData.length > 0) {
+        const assetIds = assetsData.map(a => a.id).join(',');
+        try {
+          const pricesResponse = await axios.get<PriceInfo[]>(
+            `${API_BASE_URL}/api/v1/prices/latest/batch?asset_ids=${assetIds}`
+          );
+          const pricesData = pricesResponse.data || [];
+          
+          // Merge assets with prices
+          const priceMap = new Map(pricesData.map(p => [p.asset_id, p]));
+          const mergedAssets = assetsData.map(asset => ({
+            ...asset,
+            price: priceMap.get(asset.id)
+          }));
+          
+          setAssets(mergedAssets);
+          setLastRefresh(new Date());
+        } catch (priceError) {
+          console.error('Failed to load prices:', priceError);
+          setAssets(assetsData.map(asset => ({ ...asset })));
+        }
+      } else {
+        setAssets([]);
+      }
     } catch (error) {
       console.error('Failed to load watchlist:', error);
       setAssets([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  // 删除资产
+  // Manual refresh prices only
+  const refreshPrices = useCallback(async () => {
+    if (assets.length === 0 || priceLoading) return;
+    
+    setPriceLoading(true);
+    setRefreshing(true);
+    try {
+      const assetIds = assets.map(a => a.id).join(',');
+      const pricesResponse = await axios.get<PriceInfo[]>(
+        `${API_BASE_URL}/api/v1/prices/latest/batch?asset_ids=${assetIds}`
+      );
+      const pricesData = pricesResponse.data || [];
+      
+      const priceMap = new Map(pricesData.map(p => [p.asset_id, p]));
+      setAssets(prev => prev.map(asset => ({
+        ...asset,
+        price: priceMap.get(asset.id) || asset.price
+      })));
+      setLastRefresh(new Date());
+    } catch (error) {
+      console.error('Failed to refresh prices:', error);
+    } finally {
+      setPriceLoading(false);
+      setRefreshing(false);
+    }
+  }, [assets.length, priceLoading]);
+
+  // Initial load
+  useEffect(() => {
+    loadWatchlist();
+  }, [loadWatchlist]);
+
+  // Auto refresh prices
+  useEffect(() => {
+    if (assets.length === 0) return;
+    
+    const intervalId = setInterval(() => {
+      refreshPrices();
+    }, AUTO_REFRESH_INTERVAL);
+    
+    return () => clearInterval(intervalId);
+  }, [assets.length, refreshPrices]);
+
+  // Delete asset
   const handleDelete = async (id: string) => {
     if (deletingId) return;
     
@@ -54,7 +151,30 @@ export default function Watchlist() {
     }
   };
 
-  // 获取资产类型显示
+  // Format price with currency
+  const formatPrice = (price: number, currency?: string) => {
+    const symbol = currency === 'USD' ? '$' : currency === 'CNY' ? '¥' : '';
+    return `${symbol}${price.toLocaleString('en-US', { 
+      minimumFractionDigits: 2, 
+      maximumFractionDigits: 4 
+    })}`;
+  };
+
+  // Format change percent
+  const formatChange = (change?: number, changePercent?: number) => {
+    if (changePercent === undefined || changePercent === null) return null;
+    const isPositive = changePercent >= 0;
+    const sign = isPositive ? '+' : '';
+    return {
+      text: `${sign}${changePercent.toFixed(2)}%`,
+      subText: change !== undefined ? `(${sign}${change.toFixed(2)})` : '',
+      isPositive,
+      color: isPositive ? '#22c55e' : '#ef4444',
+      bg: isPositive ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)'
+    };
+  };
+
+  // Get asset type display
   const getAssetTypeLabel = (type: string) => {
     const labels: Record<string, string> = {
       equity: '股票',
@@ -66,7 +186,7 @@ export default function Watchlist() {
     return labels[type] || type;
   };
 
-  // 获取资产类型颜色
+  // Get asset type color
   const getAssetTypeColor = (type: string) => {
     const colors: Record<string, { bg: string; color: string }> = {
       equity: { bg: 'rgba(99, 102, 241, 0.1)', color: '#6366f1' },
@@ -76,6 +196,20 @@ export default function Watchlist() {
       forex: { bg: 'rgba(6, 182, 212, 0.1)', color: '#06b6d4' },
     };
     return colors[type] || { bg: 'rgba(99, 102, 241, 0.1)', color: '#6366f1' };
+  };
+
+  // Get freshness indicator
+  const getFreshnessIndicator = (freshness?: string) => {
+    switch (freshness) {
+      case 'fresh':
+        return { color: '#22c55e', label: '最新' };
+      case 'stale':
+        return { color: '#f59e0b', label: '滞后' };
+      case 'outdated':
+        return { color: '#ef4444', label: '过期' };
+      default:
+        return { color: '#9ca3af', label: '无数据' };
+    }
   };
 
   const hasWatchlist = assets.length > 0;
@@ -98,28 +232,61 @@ export default function Watchlist() {
           </h1>
           <p style={{ fontSize: '15px', color: 'var(--text-muted)', margin: 0 }}>
             管理你关注的标的 ({assets.length})
+            {lastRefresh && (
+              <span style={{ marginLeft: '12px', fontSize: '13px' }}>
+                更新于 {dayjs(lastRefresh).fromNow()}
+              </span>
+            )}
           </p>
         </div>
-        <Link
-          to="/assets"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '8px',
-            padding: '10px 20px',
-            borderRadius: '12px',
-            border: 'none',
-            background: 'var(--primary-color)',
-            color: 'white',
-            fontSize: '14px',
-            fontWeight: 600,
-            textDecoration: 'none',
-            transition: 'all 0.3s ease',
-          }}
-        >
-          <Plus size={18} />
-          添加标的
-        </Link>
+        <div style={{ display: 'flex', gap: '12px' }}>
+          {/* Refresh Button */}
+          {hasWatchlist && (
+            <button
+              onClick={refreshPrices}
+              disabled={refreshing}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '10px 20px',
+                borderRadius: '12px',
+                border: '1px solid var(--border-color)',
+                background: 'var(--bg-secondary)',
+                color: 'var(--text-primary)',
+                fontSize: '14px',
+                fontWeight: 600,
+                cursor: refreshing ? 'not-allowed' : 'pointer',
+                opacity: refreshing ? 0.7 : 1,
+                transition: 'all 0.3s ease',
+              }}
+              title="刷新价格"
+            >
+              <RefreshCw size={18} className={refreshing ? 'animate-spin' : ''} />
+              刷新
+            </button>
+          )}
+          <Link
+            to="/assets"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '10px 20px',
+              borderRadius: '12px',
+              border: 'none',
+              background: 'var(--primary-color)',
+              color: 'white',
+              fontSize: '14px',
+              fontWeight: 600,
+              textDecoration: 'none',
+              transition: 'all 0.3s ease',
+            }}
+          >
+            <Plus size={18} />
+            添加标的
+          </Link>
+        </div>
       </div>
 
       {/* Watchlist Content */}
@@ -208,15 +375,19 @@ export default function Watchlist() {
             <thead>
               <tr style={{ background: 'var(--bg-secondary)' }}>
                 <th style={thStyle}>标的</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>价格</th>
+                <th style={{ ...thStyle, textAlign: 'right' }}>涨跌</th>
                 <th style={thStyle}>类型</th>
-                <th style={thStyle}>交易所</th>
-                <th style={thStyle}>货币</th>
+                <th style={{ ...thStyle, textAlign: 'center' }}>状态</th>
                 <th style={{ ...thStyle, textAlign: 'center' }}>操作</th>
               </tr>
             </thead>
             <tbody>
               {assets.map((asset, index) => {
                 const typeStyle = getAssetTypeColor(asset.asset_type);
+                const change = asset.price ? formatChange(asset.price.change, asset.price.change_percent) : null;
+                const freshness = getFreshnessIndicator(asset.price?.data_freshness);
+                
                 return (
                   <tr
                     key={asset.id}
@@ -232,6 +403,7 @@ export default function Watchlist() {
                       e.currentTarget.style.background = 'transparent';
                     }}
                   >
+                    {/* Asset Info */}
                     <td style={tdStyle}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                         <div
@@ -276,6 +448,68 @@ export default function Watchlist() {
                         </div>
                       </div>
                     </td>
+
+                    {/* Price */}
+                    <td style={{ ...tdStyle, textAlign: 'right' }}>
+                      {asset.price ? (
+                        <div>
+                          <span
+                            style={{
+                              fontSize: '16px',
+                              fontWeight: 700,
+                              color: 'var(--text-primary)',
+                            }}
+                          >
+                            {formatPrice(asset.price.close, asset.currency)}
+                          </span>
+                          <p
+                            style={{
+                              fontSize: '11px',
+                              color: 'var(--text-muted)',
+                              margin: '2px 0 0 0',
+                            }}
+                          >
+                            {dayjs(asset.price.date).format('MM-DD')}
+                          </p>
+                        </div>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
+                          无数据
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Change */}
+                    <td style={{ ...tdStyle, textAlign: 'right' }}>
+                      {change ? (
+                        <div
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            padding: '4px 8px',
+                            borderRadius: '6px',
+                            background: change.bg,
+                            color: change.color,
+                            fontSize: '13px',
+                            fontWeight: 600,
+                          }}
+                        >
+                          {change.isPositive ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
+                          {change.text}
+                        </div>
+                      ) : asset.price ? (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
+                          -
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
+                          无数据
+                        </span>
+                      )}
+                    </td>
+
+                    {/* Type */}
                     <td style={tdStyle}>
                       <span
                         style={{
@@ -290,16 +524,32 @@ export default function Watchlist() {
                         {getAssetTypeLabel(asset.asset_type)}
                       </span>
                     </td>
-                    <td style={tdStyle}>
-                      <span style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
-                        {asset.exchange || '-'}
-                      </span>
+
+                    {/* Data Freshness */}
+                    <td style={{ ...tdStyle, textAlign: 'center' }}>
+                      <div
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                          fontSize: '12px',
+                          color: freshness.color,
+                        }}
+                        title={`数据状态: ${freshness.label}\n最后更新: ${asset.price?.last_updated ? dayjs(asset.price.last_updated).format('YYYY-MM-DD HH:mm:ss') : '无'}`}
+                      >
+                        <span
+                          style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '50%',
+                            background: freshness.color,
+                          }}
+                        />
+                        {freshness.label}
+                      </div>
                     </td>
-                    <td style={tdStyle}>
-                      <span style={{ fontSize: '14px', color: 'var(--text-primary)' }}>
-                        {asset.currency || '-'}
-                      </span>
-                    </td>
+
+                    {/* Actions */}
                     <td style={{ ...tdStyle, textAlign: 'center' }}>
                       <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
                         <Link
@@ -347,11 +597,36 @@ export default function Watchlist() {
           </table>
         </div>
       )}
+
+      {/* Data Status Footer */}
+      {hasWatchlist && (
+        <div
+          style={{
+            marginTop: '16px',
+            padding: '12px 16px',
+            background: 'var(--bg-secondary)',
+            borderRadius: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            fontSize: '13px',
+            color: 'var(--text-muted)',
+          }}
+        >
+          <AlertCircle size={16} />
+          <span>
+            价格数据自动每 60 秒刷新一次。
+            <span style={{ color: '#22c55e', marginLeft: '4px' }}>●</span> 最新
+            <span style={{ color: '#f59e0b', marginLeft: '4px' }}>●</span> 滞后(1-2天)
+            <span style={{ color: '#ef4444', marginLeft: '4px' }}>●</span> 过期(2天以上)
+          </span>
+        </div>
+      )}
     </div>
   );
 }
 
-// 样式常量
+// Style constants
 const thStyle: React.CSSProperties = {
   padding: '14px 16px',
   textAlign: 'left',
